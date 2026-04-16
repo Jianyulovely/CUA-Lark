@@ -26,6 +26,10 @@ from typing import Literal
 from openai import OpenAI
 
 from cua_lark.config import config
+from cua_lark.core.logger import get_logger
+
+_log = get_logger("视觉")
+
 
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +101,59 @@ class UITARSClient:
         )
         self._model = config.vision_ep
 
+    # ── 验证用 system prompt（问答模式，区别于动作预测）──────────────────────────
+    VERIFY_PROMPT = (
+        "You are a GUI verification agent. "
+        "You will receive a screenshot and a yes/no question about the current UI state.\n\n"
+        "Answer with ONLY this format (no extra text):\n"
+        "Result: YES\n"
+        "Reason: <one sentence in Chinese>\n\n"
+        "or:\n"
+        "Result: NO\n"
+        "Reason: <one sentence in Chinese explaining what is missing or wrong>"
+    )
+
+    def verify(
+        self,
+        question: str,
+        screenshot_base64: str,
+    ):
+        """
+        视觉问答：截图 + 是/否问题 → VerifyResult。
+        用于任务执行后确认业务结果，区别于 predict() 的"动作预测"模式。
+        """
+        from cua_lark.verification.verifier import VerifyResult
+
+        image_url = f"data:image/png;base64,{screenshot_base64}"
+        _log.info(f"视觉验证  '{question}'")
+
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": self.VERIFY_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": question},
+                    ],
+                },
+            ],
+            temperature=0,
+            max_tokens=128,
+        )
+
+        raw = response.choices[0].message.content or ""
+        success = "result: yes" in raw.lower()
+
+        import re as _re
+        m = _re.search(r"Reason:\s*(.+)", raw, _re.IGNORECASE)
+        reason = m.group(1).strip() if m else raw.strip()
+
+        _log.info(f"验证结论  {'✓ 通过' if success else '✗ 失败'}  {reason}")
+        return VerifyResult(success=success, message=reason)
+
+    # ── 动作预测（原有方法）────────────────────────────────────────────────────
     def predict(
         self,
         instruction: str,
@@ -122,6 +179,7 @@ class UITARSClient:
 
         image_url = f"data:image/png;base64,{screenshot_base64}"
 
+        _log.info(f"调用视觉模型  指令='{instruction}'")
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -137,7 +195,12 @@ class UITARSClient:
         )
 
         raw_output = response.choices[0].message.content or ""
-        return _parse_action(raw_output, screen_width, screen_height)
+        action = _parse_action(raw_output, screen_width, screen_height)
+        if action.action_type == "click":
+            _log.info(f"解析结果  {action.action_type} @ ({action.x}, {action.y})  thought='{action.thought}'")
+        else:
+            _log.info(f"解析结果  {action.action_type}  thought='{action.thought}'")
+        return action
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────────

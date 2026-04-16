@@ -17,8 +17,14 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import win32con
+import win32gui
 from pywinauto import Desktop
 from pywinauto.application import Application
+
+from cua_lark.core.logger import get_logger
+
+_log = get_logger("感知")
 
 
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
@@ -70,24 +76,50 @@ class TreeParser:
 
     # ── 连接 ─────────────────────────────────────────────────────────────────
 
-    def connect(self, title_pattern: str = ".*飞书.*") -> None:
-        """连接飞书主窗口"""
-        self._app = Application(backend="uia").connect(
-            title_re=title_pattern, timeout=10
-        )
+    def connect(self, title: str = "飞书") -> None:
+        """
+        连接飞书主窗口（精确标题匹配）。
+        - 自动唤起最小化/后台的飞书窗口并置于前台
+        - 若存在多个同名窗口，取面积最大的作为主窗口
+        - 找不到则提示用户打开飞书
+        """
+        _log.info(f"搜索窗口 '{title}'...")
+        handles: list[int] = []
+        def _enum(hwnd, _):
+            if win32gui.GetWindowText(hwnd) == title:
+                handles.append(hwnd)
+        win32gui.EnumWindows(_enum, None)
+
+        if not handles:
+            raise RuntimeError(f"未找到标题为 '{title}' 的窗口，请先打开飞书桌面端")
+
+        def _area(h: int) -> int:
+            l, t, r, b = win32gui.GetWindowRect(h)
+            return (r - l) * (b - t)
+
+        hwnd = max(handles, key=_area)
+        _log.info(f"唤起窗口 hwnd={hwnd}，置前台...")
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.8)
+
+        self._app = Application(backend="uia").connect(handle=hwnd)
         self._win = self._app.top_window()
+        _log.info("飞书主窗口连接成功")
 
     def connect_window(self, title: str, timeout: float = 5.0) -> bool:
         """
         连接指定标题的顶层窗口（用于独立弹窗，如"创建日程"）。
         返回 True 表示连接成功，False 表示超时未找到。
         """
+        _log.info(f"等待新窗口 '{title}'（超时 {timeout}s）...")
         deadline = time.time() + timeout
         while time.time() < deadline:
             for w in Desktop(backend="uia").windows():
                 try:
                     if w.window_text() == title:
                         self._win = w
+                        _log.info(f"已连接新窗口 '{title}'")
                         return True
                 except Exception:
                     pass

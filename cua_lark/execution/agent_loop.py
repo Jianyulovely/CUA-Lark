@@ -19,9 +19,13 @@ from io import BytesIO
 import pyautogui
 
 from cua_lark.core.api_client import UITARSClient
+from cua_lark.core.logger import get_logger
 from cua_lark.execution.cua_executor import CUAExecutor
 from cua_lark.perception.tree_parser import TreeParser
 from cua_lark.planning.template_library import TemplateStep
+from cua_lark.verification.verifier import TaskTemplate
+
+_log = get_logger("执行")
 
 
 class AgentLoop:
@@ -43,10 +47,49 @@ class AgentLoop:
         """连接飞书主窗口"""
         self._parser.connect()
 
+    def run_with_verify(self, template: TaskTemplate) -> None:
+        """
+        执行模板步骤，完成后调用视觉验证，失败则自动重试。
+        最多重试 config.max_retry 次（共执行 max_retry+1 次）。
+        """
+        from cua_lark.config import config
+
+        max_attempts = config.max_retry + 1
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                _log.info(f"─── 第 {attempt} 次重试 ───")
+                # 重新连接主窗口（上次执行可能切换了窗口）
+                self._parser.connect()
+
+            try:
+                self.run(template.steps)
+            except RuntimeError as e:
+                _log.warning(f"执行失败（第{attempt}次）: {e}")
+                if attempt < max_attempts:
+                    continue
+                raise
+
+            # ── 验证 ──────────────────────────────────────────────────────
+            _log.info("执行完毕，开始验证结果...")
+            result = template.verify_fn(self._parser, self._ui_tars)
+
+            if result.success:
+                _log.info(f"验证通过：{result.message}")
+                return
+
+            _log.warning(f"验证失败（第{attempt}次）：{result.message}")
+            if attempt < max_attempts:
+                _log.info("准备重试整个任务...")
+            else:
+                raise RuntimeError(
+                    f"任务执行完成但验证失败（已重试 {config.max_retry} 次）：{result.message}"
+                )
+
     def run(self, steps: list[TemplateStep]) -> None:
-        """按序执行所有步骤"""
+        """按序执行所有步骤（无验证，供内部和测试脚本调用）"""
+        _log.info(f"开始执行，共 {len(steps)} 步")
         for step in steps:
-            print(f"  [{step.step_id}] {step.description}")
+            _log.info(f"[{step.step_id}] ({step.routing:8}) {step.description}")
             self._execute_step(step)
             time.sleep(step.wait_ms / 1000)
 
@@ -57,7 +100,7 @@ class AgentLoop:
                     raise RuntimeError(
                         f"[{step.step_id}] 等待窗口 '{step.switch_to_window}' 超时"
                     )
-                print(f"         已切换到新窗口: '{step.switch_to_window}'")
+        _log.info("所有步骤执行完毕")
 
     # ── 步骤分发 ──────────────────────────────────────────────────────────────
 
@@ -89,7 +132,7 @@ class AgentLoop:
                          f"name={step.selector.name!r}")
             raise RuntimeError(f"[{step.step_id}] 未在 UI 树中找到元素: {desc}")
 
-        print(f"         找到元素：{elem.name!r}，中心=({elem.center_x}, {elem.center_y})")
+        _log.info(f"找到元素 '{elem.name}' @ ({elem.center_x}, {elem.center_y})，执行点击")
         self._executor.click(elem.center_x, elem.center_y)
 
     # ── keyboard：直接发送按键或文本 ──────────────────────────────────────────
@@ -110,11 +153,10 @@ class AgentLoop:
     # ── vision：截图 → UI-TARS → 执行 ────────────────────────────────────────
 
     def _run_vision(self, step: TemplateStep) -> None:
-        print(f"         截图中...")
+        _log.info("截图中...")
         screenshot_b64 = _capture_screenshot_base64()
         w, h = pyautogui.size()
 
-        print(f"         调用 UI-TARS，指令：{step.description!r}")
         action = self._ui_tars.predict(
             instruction=step.description,
             screenshot_base64=screenshot_b64,
@@ -122,22 +164,20 @@ class AgentLoop:
             screen_height=h,
         )
 
-        print(f"         思考：{action.thought!r}")
-        print(f"         动作：{action.action_type}  坐标=({action.x}, {action.y})")
-
         if action.action_type == "click":
+            _log.info(f"执行点击 @ ({action.x}, {action.y})")
             self._executor.click(action.x, action.y)
         elif action.action_type == "finished":
-            print(f"         [视觉模型] 认为步骤已完成，跳过点击")
+            _log.info("视觉模型认为步骤已完成，跳过点击")
         elif action.action_type == "unknown":
             raise RuntimeError(
                 f"[{step.step_id}] 视觉模型输出无法解析，请检查格式。\n"
-                f"         原始输出：\n{action.raw}"
+                f"原始输出：\n{action.raw}"
             )
         else:
             raise RuntimeError(
                 f"[{step.step_id}] 视觉模型返回了意外动作类型: {action.action_type}\n"
-                f"         原始输出：\n{action.raw}"
+                f"原始输出：\n{action.raw}"
             )
 
 
