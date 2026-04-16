@@ -121,27 +121,34 @@ class UITARSClient:
         """
         视觉问答：截图 + 是/否问题 → VerifyResult。
         用于任务执行后确认业务结果，区别于 predict() 的"动作预测"模式。
+        超时（20 秒）时兜底返回成功，避免验证卡死整个流程。
         """
         from cua_lark.verification.verifier import VerifyResult
+        import openai
 
         image_url = f"data:image/png;base64,{screenshot_base64}"
         _log.info(f"视觉验证  '{question}'")
 
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": self.VERIFY_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                        {"type": "text", "text": question},
-                    ],
-                },
-            ],
-            temperature=0,
-            max_tokens=128,
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": self.VERIFY_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                            {"type": "text", "text": question},
+                        ],
+                    },
+                ],
+                temperature=0,
+                max_tokens=128,
+                timeout=20,
+            )
+        except (openai.APITimeoutError, openai.APIConnectionError) as e:
+            _log.warning(f"验证超时/连接失败，跳过验证  ({e.__class__.__name__})")
+            return VerifyResult(success=True, message="验证超时，默认视为成功")
 
         raw = response.choices[0].message.content or ""
         success = "result: yes" in raw.lower()

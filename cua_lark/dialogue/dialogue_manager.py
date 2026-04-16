@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from openai import OpenAI
 
@@ -39,7 +40,7 @@ class DialogueState:
 # 意图 → 必填槽位
 INTENT_REQUIRED_SLOTS: dict[str, list[str]] = {
     "send_message":  ["recipient", "content"],
-    "create_event":  ["title", "start_time"],
+    "create_event":  ["title", "start_time"],   # date 不强制追问，LLM 默认今天
     "add_todo":      ["title", "items"],
 }
 
@@ -48,13 +49,14 @@ SLOT_DESCRIPTIONS: dict[str, str] = {
     "recipient":  "收件人姓名",
     "content":    "消息内容",
     "title":      "标题（日程或文档）",
+    "date":       "日期（YYYY-MM-DD 格式，如不指定则默认今天）",
     "start_time": "开始时间（格式 HH:MM，如 14:30）",
     "end_time":   "结束时间（格式 HH:MM，如 15:30）",
     "items":      "待办事项（多条用顿号或逗号分隔，如：买菜、做饭、洗碗）",
 }
 
-_SYSTEM_PROMPT = """\
-你是飞书桌面助手的意图识别模块。
+_SYSTEM_PROMPT_TMPL = """\
+你是飞书桌面助手的意图识别模块。今天是 {{TODAY}}。
 
 支持的意图及其槽位：
 - send_message（发送飞书消息）
@@ -62,14 +64,19 @@ _SYSTEM_PROMPT = """\
 
 - create_event（创建日历日程）
   必填：title（日程标题）, start_time（开始时间，HH:MM，如 14:30）
-  选填：end_time（结束时间，HH:MM，不填则自动设为 start_time + 1 小时）
+  选填：date（日期，YYYY-MM-DD 格式；不指定则默认今天，"明天"须根据今天日期推算出具体日期）
+        end_time（结束时间，HH:MM，不填则自动设为 start_time + 1 小时）
 
 - add_todo（在云文档中创建待办事项列表）
-  必填：title（文档标题）, items（待办事项，多条用顿号或逗号分隔，如：买菜、做饭、洗碗）
+  必填：title（文档标题）, items（待办事项，多条用顿号或逗号分隔）
 
 时间解析规则：
 - "下午三点" → "15:00"，"下午两点半" → "14:30"，"上午十点" → "10:00"
 - "三点" 通常指下午，即 "15:00"
+
+日期解析规则：
+- 今天是 {{TODAY}}，"明天" 须推算为具体的 YYYY-MM-DD 并填入 date 字段
+- 如果用户没有提及日期，date 字段留空（不要填今天日期，留给系统默认处理）
 
 输出规则：
 1. 只输出 JSON，不输出任何其他文字
@@ -171,7 +178,9 @@ class DialogueManager:
     # ── 内部方法 ───────────────────────────────────────────────────────────────
 
     def _call_llm(self) -> str:
-        messages = [{"role": "system", "content": _SYSTEM_PROMPT}] + self._history
+        today = datetime.now().strftime("%Y-%m-%d %A")
+        system = _SYSTEM_PROMPT_TMPL.replace("{{TODAY}}", today)
+        messages = [{"role": "system", "content": system}] + self._history
         resp = self._client.chat.completions.create(
             model=config.planner_ep,
             messages=messages,

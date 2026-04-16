@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re as _re
 from dataclasses import dataclass, field
+from datetime import date as _date
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -57,11 +58,21 @@ def create_event_steps(slots: dict) -> TaskTemplate:
       title       日程标题
       start_time  开始时间，格式 "HH:MM"
     选填槽位：
+      date        日期，格式 "YYYY-MM-DD"（不传则默认今天，弹窗里不修改日期）
       end_time    结束时间，格式 "HH:MM"（默认 start_time + 1 小时）
     """
     title      = slots["title"]
     start_time = slots["start_time"]
     end_time   = slots.get("end_time") or _add_one_hour(start_time)
+
+    # ── 解析目标日期，判断是否需要修改弹窗里的日期 ──────────────────────────
+    date_str = slots.get("date", "")
+    try:
+        target_date = _date.fromisoformat(date_str) if date_str else _date.today()
+    except ValueError:
+        target_date = _date.today()
+    need_date_change = (target_date != _date.today())
+    month, day = target_date.month, target_date.day
 
     steps = [
         # ── 进入日历，打开弹窗 ────────────────────────────────────────────────
@@ -77,10 +88,35 @@ def create_event_steps(slots: dict) -> TaskTemplate:
             routing="tree",
             description="点击'创建日程'按钮，等待弹窗",
             selector=UITreeSelector("Button", name="创建日程"),
-            switch_to_window="创建日程",   # 点击后切换到弹窗
+            switch_to_window="创建日程",
             wait_ms=1500,
         ),
-        # ── 标题：唯一需要视觉的步骤（空输入框，UI 树不可见）────────────────
+    ]
+
+    # ── 日期不是今天时，修改弹窗中的开始日期 ────────────────────────────────
+    if need_date_change:
+        steps += [
+            TemplateStep(
+                step_id="e_date",
+                routing="vision",
+                description=(
+                    "点击创建日程弹窗中的开始日期字段"
+                    "（显示为'X月X日'格式，位于开始时间左侧），打开日期选择器日历"
+                ),
+                wait_ms=800,
+            ),
+            TemplateStep(
+                step_id="e_date_b",
+                routing="vision",
+                description=(
+                    f"在弹出的日期选择器日历中，"
+                    f"点击数字 {day}（即选择 {month} 月 {day} 日）"
+                ),
+                wait_ms=500,
+            ),
+        ]
+
+    steps += [
         TemplateStep(
             step_id="e3",
             routing="vision",
@@ -338,6 +374,9 @@ def _verify_create_event(
     title: str,
 ) -> VerifyResult:
     """截图后问视觉模型：日历视图是否出现了该日程"""
+    import time
+    _parser.connect()          # 确保飞书主窗口置于前台
+    time.sleep(2)              # 等待弹窗关闭 + 日历视图刷新
     screenshot = capture_screenshot_base64()
     return ui_tars.verify(
         question=f"在飞书日历视图中，是否已经出现了标题为 '{title}' 的日程？",
@@ -391,6 +430,22 @@ def send_message_steps(slots: dict) -> TaskTemplate:
             action_type="key",
             key_combo="ctrl+k",
             wait_ms=1000,
+        ),
+        TemplateStep(
+            step_id="s2a",
+            routing="keyboard",
+            description="Ctrl+A 全选搜索框，清除可能残留的旧内容",
+            action_type="key",
+            key_combo="ctrl+a",
+            wait_ms=100,
+        ),
+        TemplateStep(
+            step_id="s2b",
+            routing="keyboard",
+            description="Delete 删除选中内容",
+            action_type="key",
+            key_combo="delete",
+            wait_ms=100,
         ),
         TemplateStep(
             step_id="s3",

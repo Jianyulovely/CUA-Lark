@@ -17,8 +17,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import ctypes
+
+import win32api
 import win32con
 import win32gui
+import win32process
 from pywinauto import Desktop
 from pywinauto.application import Application
 
@@ -100,12 +104,29 @@ class TreeParser:
         hwnd = max(handles, key=_area)
         _log.info(f"唤起窗口 hwnd={hwnd}，置前台...")
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
+        _force_foreground(hwnd)
         time.sleep(0.8)
 
         self._app = Application(backend="uia").connect(handle=hwnd)
         self._win = self._app.top_window()
         _log.info("飞书主窗口连接成功")
+
+    def bring_to_front(self) -> None:
+        """
+        将已连接的飞书窗口置于前台（不重建 pywinauto 连接）。
+        比 connect() 快，不会破坏已有的 _win 状态。
+        窗口句柄失效时自动降级为完整 connect()。
+        """
+        if self._win is None:
+            self.connect()
+            return
+        try:
+            hwnd = self._win.handle
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            _force_foreground(hwnd)
+            time.sleep(0.3)
+        except Exception:
+            self.connect()   # 句柄失效时降级
 
     def connect_window(self, title: str, timeout: float = 5.0) -> bool:
         """
@@ -257,3 +278,35 @@ class TreeParser:
         if sel.name_contains is not None and sel.name_contains not in elem.name:
             return False
         return True
+
+
+# ── 辅助函数 ──────────────────────────────────────────────────────────────────
+
+def _force_foreground(hwnd: int) -> None:
+    """
+    强制将指定窗口置于前台。
+    直接调用 SetForegroundWindow 可能因 Windows 安全策略被拒绝（error 0），
+    先用 AttachThreadInput 借用当前前台线程的输入焦点权限再设置。
+    最终仍失败时静默继续，不抛出异常。
+    """
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+        return
+    except Exception:
+        pass
+
+    try:
+        user32 = ctypes.windll.user32
+        fg_hwnd = win32gui.GetForegroundWindow()
+        fg_tid  = win32process.GetWindowThreadProcessId(fg_hwnd)[0]
+        my_tid  = win32api.GetCurrentThreadId()
+
+        user32.AttachThreadInput(my_tid, fg_tid, True)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.AttachThreadInput(my_tid, fg_tid, False)
+    except Exception:
+        try:
+            win32gui.BringWindowToTop(hwnd)  # 最后兜底，至少让窗口可见
+        except Exception:
+            pass
