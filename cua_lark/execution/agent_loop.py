@@ -50,6 +50,15 @@ class AgentLoop:
             self._execute_step(step)
             time.sleep(step.wait_ms / 1000)
 
+            # 执行完成后切换到新顶层窗口（如"创建日程"弹窗）
+            if step.switch_to_window:
+                ok = self._parser.connect_window(step.switch_to_window, timeout=6.0)
+                if not ok:
+                    raise RuntimeError(
+                        f"[{step.step_id}] 等待窗口 '{step.switch_to_window}' 超时"
+                    )
+                print(f"         已切换到新窗口: '{step.switch_to_window}'")
+
     # ── 步骤分发 ──────────────────────────────────────────────────────────────
 
     def _execute_step(self, step: TemplateStep) -> None:
@@ -66,17 +75,19 @@ class AgentLoop:
     # ── tree：实时查坐标 → 点击 ───────────────────────────────────────────────
 
     def _run_tree(self, step: TemplateStep) -> None:
-        if step.selector is None:
-            raise ValueError(f"[{step.step_id}] tree 步骤缺少 selector")
+        # find_fn 优先，selector 兜底
+        if step.find_fn is not None:
+            elem = step.find_fn(self._parser)
+        elif step.selector is not None:
+            elem = self._parser.find(step.selector)
+        else:
+            raise ValueError(f"[{step.step_id}] tree 步骤缺少 selector 或 find_fn")
 
-        elem = self._parser.find(step.selector)
         if elem is None:
-            raise RuntimeError(
-                f"[{step.step_id}] 未在 UI 树中找到元素: "
-                f"control_type={step.selector.control_type!r}, "
-                f"name={step.selector.name!r}, "
-                f"name_contains={step.selector.name_contains!r}"
-            )
+            desc = (f"find_fn={step.find_fn.__name__}" if step.find_fn
+                    else f"control_type={step.selector.control_type!r}, "
+                         f"name={step.selector.name!r}")
+            raise RuntimeError(f"[{step.step_id}] 未在 UI 树中找到元素: {desc}")
 
         print(f"         找到元素：{elem.name!r}，中心=({elem.center_x}, {elem.center_y})")
         self._executor.click(elem.center_x, elem.center_y)
